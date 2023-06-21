@@ -1,6 +1,8 @@
 // Bootstrap types for AnalyzeGoType.java
 // Please import this file into "Data Type Manager" under the "/<program-name>/go" category.
 
+// The definitions in this file is extracted from Go 1.12, you may need to modifiy for your own Go version.
+
 typedef unsigned char   undefined;
 
 typedef unsigned char    bool;
