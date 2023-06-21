@@ -7,14 +7,19 @@
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Queue;
 import java.util.stream.Stream;
 
+import org.apache.commons.io.file.PathUtils;
+import org.apache.commons.lang3.StringUtils;
 import aQute.bnd.unmodifiable.Lists;
+import generic.util.Path;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.ArrayDataType;
@@ -78,37 +83,102 @@ final class TypeInfo {
     public final int               kind;
     public final long              size;
     public final String            name;
-    public final Address           elem;
+    public final String            path;
     public final Address           mkey;
+    public final Address           elem;
+    public final DataType          type;
     public final List<StructField> fields;
 
-    private TypeInfo(String name, int kind, long size, Address mkey, Address elem, Collection<StructField> fields) {
+    private TypeInfo keyType = null;
+    private TypeInfo elemType = null;
+
+    private TypeInfo(
+        DataType                type,
+        String                  name,
+        String                  path,
+        int                     kind,
+        long                    size,
+        Address                 mkey,
+        Address                 elem,
+        Collection<StructField> fields
+    ) {
         this.kind   = kind;
         this.size   = size;
         this.name   = name;
-        this.elem   = elem;
+        this.path   = path;
         this.mkey   = mkey;
+        this.elem   = elem;
+        this.type   = type;
         this.fields = fields == null ? null : Lists.copyOf(fields);
     }
 
-    public static TypeInfo map(String name, Address key, Address elem) {
-        return new TypeInfo(name, Kind.Map, -1, key, elem, null);
+    private String prefix(String name, boolean withPath) {
+        if (!withPath || path.isEmpty()) {
+            return name;
+        } else {
+            return path + "/" + name;
+        }
     }
 
-    public static TypeInfo basic(String name, int kind) {
-        return new TypeInfo(name, kind, -1, null, null, null);
+    private String chandir() {
+        var sb = new StringBuilder(2);
+        if ((size & 1) != 0) sb.append('r');
+        if ((size & 2) != 0) sb.append('w');
+        return sb.toString();
     }
 
-    public static TypeInfo array(String name, Address elem, long size) {
-        return new TypeInfo(name, Kind.Array, size, null, elem, null);
+    private String keyString(boolean withPath) {
+        return keyType.deriveTypeName(mkey, withPath);
     }
 
-    public static TypeInfo struct(String name, long size, Collection<StructField> fields) {
-        return new TypeInfo(name, Kind.Struct, size, null, null, fields);
+    private String elemString(boolean withPath) {
+        return elemType.deriveTypeName(elem, withPath);
     }
 
-    public static TypeInfo indirect(String name, int kind, Address elem) {
-        return new TypeInfo(name, kind, -1, null, elem, null);
+    public void setKeyType(TypeInfo type) {
+        this.keyType = Objects.requireNonNull(type, "key type is null");
+    }
+
+    public void setElemType(TypeInfo type) {
+        this.elemType = Objects.requireNonNull(type, "elem type is null");
+    }
+
+    public String deriveTypeName(Address addr, boolean withPath) {
+        return name.matches("[._\\w\\d]+") ? prefix(name, withPath) : switch (kind) {
+            case Kind.Array     -> "array<%d,%s>".formatted(size, elemString(withPath));
+            case Kind.Chan      -> "chan<%s,%s>".formatted(chandir(), elemString(withPath));
+            case Kind.Func      -> addr.toString("anonfunc_");
+            case Kind.Interface -> name.equals("interface {}") ? "eface" : addr.toString("anoniface_");
+            case Kind.Map       -> "map<%s,%s>".formatted(keyString(withPath), elemString(withPath));
+            case Kind.Ptr       -> "*" + elemString(withPath);
+            case Kind.Slice     -> "slice<%s>".formatted(elemString(withPath));
+            case Kind.Struct    -> name.equals("struct {}") ? "estruct" : addr.toString("anonstruct_");
+            default             -> prefix(name, withPath);
+        };
+    }
+
+    public static TypeInfo map(DataType type, String name, String path, Address key, Address elem) {
+        return new TypeInfo(type, name, path, Kind.Map, -1, key, elem, null);
+    }
+
+    public static TypeInfo chan(DataType type, String name, String path, Address elem, long dir) {
+        return new TypeInfo(type, name, path, Kind.Chan, dir, null, elem, null);
+    }
+
+    public static TypeInfo basic(DataType type, String name, String path, int kind) {
+        return new TypeInfo(type, name, path, kind, -1, null, null, null);
+    }
+
+    public static TypeInfo array(DataType type, String name, String path, Address elem, long size) {
+        return new TypeInfo(type, name, path, Kind.Array, size, null, elem, null);
+    }
+
+    public static TypeInfo struct(DataType type, String name, String path, long size, Collection<StructField> fields) {
+        return new TypeInfo(type, name, path, Kind.Struct, size, null, null, fields);
+    }
+
+    public static TypeInfo indirect(DataType type, String name, String path, int kind, Address elem) {
+        return new TypeInfo(type, name, path, kind, -1, null, elem, null);
     }
 }
 
@@ -116,13 +186,18 @@ final class StructField {
     public final int     offs;
     public final String  name;
     public final Address type;
+    public final Address self;
+    public final Address refs;
 
-    public StructField(String name, Address type, int offs) {
+    public StructField(String name, Address type, Address self, Address refs, int offs) {
         this.name = name;
         this.type = type;
         this.offs = offs;
+        this.self = self;
+        this.refs = refs;
     }
 }
+
 
 public class AnalyzeGoType extends GhidraScript {
     private final class Analyzer {
@@ -222,6 +297,7 @@ public class AnalyzeGoType extends GhidraScript {
             }
 
             private final class chantype {
+                public final int dir  = of(Types.chantype, "dir");
                 public final int elem = of(Types.chantype, "elem");
             }
 
@@ -347,6 +423,93 @@ public class AnalyzeGoType extends GhidraScript {
         private final Offsets Offsets = new Offsets();
         private final Symbols Symbols = new Symbols();
 
+        private final Map<Integer, DataType> TypeMap = Map.ofEntries(
+            Map.entry(Kind.Bool         , Types.rtype),
+            Map.entry(Kind.Int          , Types.rtype),
+            Map.entry(Kind.Int8         , Types.rtype),
+            Map.entry(Kind.Int16        , Types.rtype),
+            Map.entry(Kind.Int32        , Types.rtype),
+            Map.entry(Kind.Int64        , Types.rtype),
+            Map.entry(Kind.Uint         , Types.rtype),
+            Map.entry(Kind.Uint8        , Types.rtype),
+            Map.entry(Kind.Uint16       , Types.rtype),
+            Map.entry(Kind.Uint32       , Types.rtype),
+            Map.entry(Kind.Uint64       , Types.rtype),
+            Map.entry(Kind.Uintptr      , Types.rtype),
+            Map.entry(Kind.Float32      , Types.rtype),
+            Map.entry(Kind.Float64      , Types.rtype),
+            Map.entry(Kind.Complex64    , Types.rtype),
+            Map.entry(Kind.Complex128   , Types.rtype),
+            Map.entry(Kind.Array        , Types.arraytype),
+            Map.entry(Kind.Chan         , Types.chantype),
+            Map.entry(Kind.Func         , Types.functype),
+            Map.entry(Kind.Interface    , Types.interfacetype),
+            Map.entry(Kind.Map          , Types.maptype),
+            Map.entry(Kind.Ptr          , Types.ptrtype),
+            Map.entry(Kind.Slice        , Types.slicetype),
+            Map.entry(Kind.String       , Types.rtype),
+            Map.entry(Kind.Struct       , Types.structtype),
+            Map.entry(Kind.UnsafePointer, Types.rtype)
+        );
+
+        private final Map<Integer, DataType> UncommonTypeMap = Map.ofEntries(
+            Map.entry(Kind.Bool         , Types.rtype_uncommon),
+            Map.entry(Kind.Int          , Types.rtype_uncommon),
+            Map.entry(Kind.Int8         , Types.rtype_uncommon),
+            Map.entry(Kind.Int16        , Types.rtype_uncommon),
+            Map.entry(Kind.Int32        , Types.rtype_uncommon),
+            Map.entry(Kind.Int64        , Types.rtype_uncommon),
+            Map.entry(Kind.Uint         , Types.rtype_uncommon),
+            Map.entry(Kind.Uint8        , Types.rtype_uncommon),
+            Map.entry(Kind.Uint16       , Types.rtype_uncommon),
+            Map.entry(Kind.Uint32       , Types.rtype_uncommon),
+            Map.entry(Kind.Uint64       , Types.rtype_uncommon),
+            Map.entry(Kind.Uintptr      , Types.rtype_uncommon),
+            Map.entry(Kind.Float32      , Types.rtype_uncommon),
+            Map.entry(Kind.Float64      , Types.rtype_uncommon),
+            Map.entry(Kind.Complex64    , Types.rtype_uncommon),
+            Map.entry(Kind.Complex128   , Types.rtype_uncommon),
+            Map.entry(Kind.Array        , Types.arraytype_uncommon),
+            Map.entry(Kind.Chan         , Types.chantype_uncommon),
+            Map.entry(Kind.Func         , Types.functype_uncommon),
+            Map.entry(Kind.Interface    , Types.interfacetype_uncommon),
+            Map.entry(Kind.Map          , Types.maptype_uncommon),
+            Map.entry(Kind.Ptr          , Types.ptrtype_uncommon),
+            Map.entry(Kind.Slice        , Types.slicetype_uncommon),
+            Map.entry(Kind.String       , Types.rtype_uncommon),
+            Map.entry(Kind.Struct       , Types.structtype_uncommon),
+            Map.entry(Kind.UnsafePointer, Types.rtype_uncommon)
+        );
+
+        private final Map<Integer, Integer> UncommonOffsetMap = Map.ofEntries(
+            Map.entry(Kind.Bool          , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Int           , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Int8          , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Int16         , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Int32         , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Int64         , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Uint          , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Uint8         , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Uint16        , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Uint32        , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Uint64        , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Uintptr       , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Float32       , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Float64       , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Complex64     , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Complex128    , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Array         , Offsets.arraytype_uncommon.un),
+            Map.entry(Kind.Chan          , Offsets.chantype_uncommon.un),
+            Map.entry(Kind.Func          , Offsets.functype_uncommon.un),
+            Map.entry(Kind.Interface     , Offsets.interfacetype_uncommon.un),
+            Map.entry(Kind.Map           , Offsets.maptype_uncommon.un),
+            Map.entry(Kind.Ptr           , Offsets.ptrtype_uncommon.un),
+            Map.entry(Kind.Slice         , Offsets.slicetype_uncommon.un),
+            Map.entry(Kind.String        , Offsets.rtype_uncommon.un),
+            Map.entry(Kind.Struct        , Offsets.structtype_uncommon.un),
+            Map.entry(Kind.UnsafePointer , Offsets.rtype_uncommon.un)
+        );
+
         private String parseNameAt(Address addr) throws Exception {
             return new String(getBytes(
                 addr.add(3),
@@ -385,74 +548,22 @@ public class AnalyzeGoType extends GhidraScript {
             }
         }
 
-        private void runAtAddress(Address addr, Queue<Address> queue, Map<Address, TypeInfo> types) throws Exception {
+        private void scanTypes(Address addr, Queue<Address> queue, Map<Address, TypeInfo> types) throws Exception {
             var name  = "";
-            var orig  = "";
+            var path  = "";
             var size  = getLong(addr.add(Offsets.rtype.size));
             var kind  = getByte(addr.add(Offsets.rtype.kind)) & 0x1f;
             var tflag = getByte(addr.add(Offsets.rtype.tflag));
 
-            /* select new block type */
-            var type = switch (kind) {
-                case Kind.Bool          -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Int           -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Int8          -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Int16         -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Int32         -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Int64         -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Uint          -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Uint8         -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Uint16        -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Uint32        -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Uint64        -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Uintptr       -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Float32       -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Float64       -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Complex64     -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Complex128    -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Array         -> TFlags.isUncommon(tflag) ? Types.arraytype_uncommon     : Types.arraytype;
-                case Kind.Chan          -> TFlags.isUncommon(tflag) ? Types.chantype_uncommon      : Types.chantype;
-                case Kind.Func          -> TFlags.isUncommon(tflag) ? Types.functype_uncommon      : Types.functype;
-                case Kind.Interface     -> TFlags.isUncommon(tflag) ? Types.interfacetype_uncommon : Types.interfacetype;
-                case Kind.Map           -> TFlags.isUncommon(tflag) ? Types.maptype_uncommon       : Types.maptype;
-                case Kind.Ptr           -> TFlags.isUncommon(tflag) ? Types.ptrtype_uncommon       : Types.ptrtype;
-                case Kind.Slice         -> TFlags.isUncommon(tflag) ? Types.slicetype_uncommon     : Types.slicetype;
-                case Kind.String        -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                case Kind.Struct        -> TFlags.isUncommon(tflag) ? Types.structtype_uncommon    : Types.structtype;
-                case Kind.UnsafePointer -> TFlags.isUncommon(tflag) ? Types.rtype_uncommon         : Types.rtype;
-                default                 -> throw new AnalyzeException("invalid type kind %d".formatted(kind));
-            };
+            /* select new basic type */
+            var type = TFlags.isUncommon(tflag)
+                ? UncommonTypeMap.get(kind)
+                : TypeMap.get(kind);
 
-            /* select uncommon offset, if any */
-            var uncommon = switch (kind) {
-                case Kind.Bool          -> Offsets.rtype_uncommon.un;
-                case Kind.Int           -> Offsets.rtype_uncommon.un;
-                case Kind.Int8          -> Offsets.rtype_uncommon.un;
-                case Kind.Int16         -> Offsets.rtype_uncommon.un;
-                case Kind.Int32         -> Offsets.rtype_uncommon.un;
-                case Kind.Int64         -> Offsets.rtype_uncommon.un;
-                case Kind.Uint          -> Offsets.rtype_uncommon.un;
-                case Kind.Uint8         -> Offsets.rtype_uncommon.un;
-                case Kind.Uint16        -> Offsets.rtype_uncommon.un;
-                case Kind.Uint32        -> Offsets.rtype_uncommon.un;
-                case Kind.Uint64        -> Offsets.rtype_uncommon.un;
-                case Kind.Uintptr       -> Offsets.rtype_uncommon.un;
-                case Kind.Float32       -> Offsets.rtype_uncommon.un;
-                case Kind.Float64       -> Offsets.rtype_uncommon.un;
-                case Kind.Complex64     -> Offsets.rtype_uncommon.un;
-                case Kind.Complex128    -> Offsets.rtype_uncommon.un;
-                case Kind.Array         -> Offsets.arraytype_uncommon.un;
-                case Kind.Chan          -> Offsets.chantype_uncommon.un;
-                case Kind.Func          -> Offsets.functype_uncommon.un;
-                case Kind.Interface     -> Offsets.interfacetype_uncommon.un;
-                case Kind.Map           -> Offsets.maptype_uncommon.un;
-                case Kind.Ptr           -> Offsets.ptrtype_uncommon.un;
-                case Kind.Slice         -> Offsets.slicetype_uncommon.un;
-                case Kind.String        -> Offsets.rtype_uncommon.un;
-                case Kind.Struct        -> Offsets.structtype_uncommon.un;
-                case Kind.UnsafePointer -> Offsets.rtype_uncommon.un;
-                default                 -> throw new AnalyzeException("invalid type kind %d".formatted(kind));
-            };
+            /* the type must exist */
+            if (type == null) {
+                throw new AnalyzeException("invalid type kind %d".formatted(kind));
+            }
 
             /* add pointer element to the buffer */
             if (kind == Kind.Ptr) {
@@ -478,44 +589,39 @@ public class AnalyzeGoType extends GhidraScript {
                 name = name.substring(1);
             }
 
+            /* update monitor */
+            if (!name.isEmpty()) {
+                monitor.setMessage("Scan: " + name);
+            } else {
+                monitor.setMessage("Scan: <unnamed>." + addr.toString());
+            }
+
             /* add package path for uncommon types */
             if (TFlags.isUncommon(tflag)) {
-                var prog = currentProgram.getName() + "/";
-                var offs = getInt(addr.add(uncommon + Offsets.uncommontype.pkgpath));
-                var path = parseNameAt(resolveOffset(addr, offs));
+                var rpos = 0;
+                var offs = getInt(addr.add(UncommonOffsetMap.get(kind) + Offsets.uncommontype.pkgpath));
+                var vals = StringUtils.split(parseNameAt(resolveOffset(addr, offs)), '/');
 
-                /* remove leading slash if any */
-                if (path.startsWith("/")) {
-                    path = path.substring(1);
+                /* check if the package path is valid */
+                if (vals == null || vals.length == 0) {
+                    vals = new String[] { "" };
                 }
 
                 /* remove program name prefix if any */
-                if (path.startsWith(prog)) {
-                    path = path.substring(prog.length());
+                if (vals[rpos].equals(currentProgram.getName())) {
+                    rpos++;
                 }
 
                 /* remove vendor prefixes if any */
-                if (path.startsWith("vendor/")) {
-                    path = path.substring(7);
+                if (vals[rpos].equals("vendor")) {
+                    rpos++;
                 }
 
-                /* don't add empty or single-level package path */
-                if (path.contains("/")) {
-                    name = path + ":" + name;
+                /* remove the last part (which is almost wrong) */
+                if (vals.length - rpos >= 2) {
+                    vals = Arrays.copyOfRange(vals, rpos, vals.length - 1);
+                    path = StringUtils.join(vals, '/');
                 }
-            }
-
-            /* spaces are invalid symbol characters */
-            orig = name;
-            name = name.replaceAll(" ", "_");
-
-            /* set type for the address range */
-            monitor.setMessage("Metadata: " + orig);
-            DataUtilities.createData(currentProgram, addr, type, type.getLength(), ClearDataMode.CLEAR_ALL_CONFLICT_DATA);
-
-            /* prepend with "type:" to identify that this is a type */
-            if (str != 0) {
-                createLabel(addr, "type:" + name, true, SourceType.ANALYSIS);
             }
 
             /* construct type info */
@@ -524,48 +630,50 @@ public class AnalyzeGoType extends GhidraScript {
                     throw new AnalyzeException("invalid type kind %d".formatted(kind));
                 }
 
-                /* simple types, we treat all funcs as `void *` and all ifaces as `iface` */
-                case Kind.Bool          -> TypeInfo.basic(name, Kind.Bool);
-                case Kind.Int           -> TypeInfo.basic(name, Kind.Int);
-                case Kind.Int8          -> TypeInfo.basic(name, Kind.Int8);
-                case Kind.Int16         -> TypeInfo.basic(name, Kind.Int16);
-                case Kind.Int32         -> TypeInfo.basic(name, Kind.Int32);
-                case Kind.Int64         -> TypeInfo.basic(name, Kind.Int64);
-                case Kind.Uint          -> TypeInfo.basic(name, Kind.Uint);
-                case Kind.Uint8         -> TypeInfo.basic(name, Kind.Uint8);
-                case Kind.Uint16        -> TypeInfo.basic(name, Kind.Uint16);
-                case Kind.Uint32        -> TypeInfo.basic(name, Kind.Uint32);
-                case Kind.Uint64        -> TypeInfo.basic(name, Kind.Uint64);
-                case Kind.Uintptr       -> TypeInfo.basic(name, Kind.Uintptr);
-                case Kind.Float32       -> TypeInfo.basic(name, Kind.Float32);
-                case Kind.Float64       -> TypeInfo.basic(name, Kind.Float64);
-                case Kind.Complex64     -> TypeInfo.basic(name, Kind.Complex64);
-                case Kind.Complex128    -> TypeInfo.basic(name, Kind.Complex128);
-                case Kind.Func          -> TypeInfo.basic(name, Kind.Func);
-                case Kind.Interface     -> TypeInfo.basic(name, Kind.Interface);
-                case Kind.String        -> TypeInfo.basic(name, Kind.String);
-                case Kind.UnsafePointer -> TypeInfo.basic(name, Kind.UnsafePointer);
-                case Kind.Struct        -> null;
+                /* simple types, we treat all funcs as `void *` and all ifaces as `iface`
+                 * for structs, we use a dummy basic struct just for deriving type name */
+                case Kind.Bool          -> TypeInfo.basic(type, name, path, Kind.Bool);
+                case Kind.Int           -> TypeInfo.basic(type, name, path, Kind.Int);
+                case Kind.Int8          -> TypeInfo.basic(type, name, path, Kind.Int8);
+                case Kind.Int16         -> TypeInfo.basic(type, name, path, Kind.Int16);
+                case Kind.Int32         -> TypeInfo.basic(type, name, path, Kind.Int32);
+                case Kind.Int64         -> TypeInfo.basic(type, name, path, Kind.Int64);
+                case Kind.Uint          -> TypeInfo.basic(type, name, path, Kind.Uint);
+                case Kind.Uint8         -> TypeInfo.basic(type, name, path, Kind.Uint8);
+                case Kind.Uint16        -> TypeInfo.basic(type, name, path, Kind.Uint16);
+                case Kind.Uint32        -> TypeInfo.basic(type, name, path, Kind.Uint32);
+                case Kind.Uint64        -> TypeInfo.basic(type, name, path, Kind.Uint64);
+                case Kind.Uintptr       -> TypeInfo.basic(type, name, path, Kind.Uintptr);
+                case Kind.Float32       -> TypeInfo.basic(type, name, path, Kind.Float32);
+                case Kind.Float64       -> TypeInfo.basic(type, name, path, Kind.Float64);
+                case Kind.Complex64     -> TypeInfo.basic(type, name, path, Kind.Complex64);
+                case Kind.Complex128    -> TypeInfo.basic(type, name, path, Kind.Complex128);
+                case Kind.Func          -> TypeInfo.basic(type, name, path, Kind.Func);
+                case Kind.Interface     -> TypeInfo.basic(type, name, path, Kind.Interface);
+                case Kind.String        -> TypeInfo.basic(type, name, path, Kind.String);
+                case Kind.Struct        -> TypeInfo.basic(type, name, path, Kind.Struct);
+                case Kind.UnsafePointer -> TypeInfo.basic(type, name, path, Kind.UnsafePointer);
 
                 /* pointers */
                 case Kind.Ptr -> {
                     var elem = toAddr(getLong(addr.add(Offsets.ptrtype.elem)));
                     queue.add(elem);
-                    yield TypeInfo.indirect(name, Kind.Ptr, elem);
+                    yield TypeInfo.indirect(type, name, path, Kind.Ptr, elem);
                 }
 
                 /* channels */
                 case Kind.Chan -> {
+                    var dir = getLong(addr.add(Offsets.chantype.dir));
                     var elem = toAddr(getLong(addr.add(Offsets.chantype.elem)));
                     queue.add(elem);
-                    yield TypeInfo.indirect(name, Kind.Chan, elem);
+                    yield TypeInfo.chan(type, name, path, elem, dir);
                 }
 
                 /* slices */
                 case Kind.Slice -> {
                     var elem = toAddr(getLong(addr.add(Offsets.slicetype.elem)));
                     queue.add(elem);
-                    yield TypeInfo.indirect(name, Kind.Slice, elem);
+                    yield TypeInfo.indirect(type, name, path, Kind.Slice, elem);
                 }
 
                 /* fixed arrays */
@@ -574,7 +682,7 @@ public class AnalyzeGoType extends GhidraScript {
                     var slice = toAddr(getLong(addr.add(Offsets.arraytype.slice)));
                     queue.add(elem);
                     queue.add(slice);
-                    yield TypeInfo.array(name, elem, getLong(addr.add(Offsets.arraytype.len)));
+                    yield TypeInfo.array(type, name, path, elem, getLong(addr.add(Offsets.arraytype.len)));
                 }
 
                 /* maps */
@@ -585,14 +693,14 @@ public class AnalyzeGoType extends GhidraScript {
                     queue.add(key);
                     queue.add(elem);
                     queue.add(bucket);
-                    yield TypeInfo.map(name, key, elem);
+                    yield TypeInfo.map(type, name, path, key, elem);
                 }
             };
 
             /* add the type info */
             if (kind != Kind.Struct) {
                 types.put(addr, rtti);
-                setToolStatusMessage("Found type at %s: %s".formatted(addr, orig), false);
+                setToolStatusMessage("Found type at %s: %s".formatted(addr, name), false);
                 return;
             }
 
@@ -602,31 +710,13 @@ public class AnalyzeGoType extends GhidraScript {
                 : Offsets.structtype.fields;
 
             /* field table address and size */
+            var fieldSeq = new ArrayList<StructField>();
             var fieldLen = getLong(addr.add(fields + Offsets.slice.len));
             var fieldTab = toAddr(getLong(addr.add(fields + Offsets.slice.data)));
 
             /* check field length */
             if (fieldLen < 0 || fieldLen > Integer.MAX_VALUE) {
                 throw new AnalyzeException("field length out of bounds: %d".formatted(fieldLen));
-            }
-
-            /* create the array type */
-            var typed = new ArrayList<StructField>();
-            var itemLen = Types.structfield.getLength();
-            var fieldsTy = new ArrayDataType(Types.structfield, (int)fieldLen, itemLen);
-
-            /* set type for the address range */
-            DataUtilities.createData(
-                currentProgram,
-                fieldTab,
-                fieldsTy,
-                fieldsTy.getLength(),
-                ClearDataMode.CLEAR_ALL_CONFLICT_DATA
-            );
-
-            /* mark the field table location */
-            if (str != 0) {
-                createLabel(fieldTab, "fields:" + name, true, SourceType.ANALYSIS);
             }
 
             /* process each field */
@@ -642,29 +732,112 @@ public class AnalyzeGoType extends GhidraScript {
                 var ss = toAddr(getLong(fp));
                 var fn = parseNameAt(ss);
 
-                /* add field type and name */
-                createLabel(ss, "name:" + fn, true, SourceType.ANALYSIS);
-                setEOLComment(fp, fn);
-
                 /* add to registry */
                 queue.add(ty);
-                typed.add(new StructField(fn, ty, (int)dx));
+                fieldSeq.add(new StructField(fn, ty, fp, ss, (int)dx));
             }
 
             /* add the struct */
-            types.put(addr, TypeInfo.struct(name, size, typed));
-            setToolStatusMessage("Found type at %s: %s".formatted(addr, orig), false);
+            types.put(addr, TypeInfo.struct(type, name, path, size, fieldSeq));
+            setToolStatusMessage("Found type at %s: %s".formatted(addr, name), false);
         }
 
-        private StructureDataType addStruct(
+        private void defineTypeLabel(Address addr, TypeInfo ti) throws Exception {
+            var type = ti.type;
+            var name = ti.deriveTypeName(addr, true);
+
+            /* update monitor */
+            monitor.setMessage("Define: " + name);
+            monitor.incrementProgress(1);
+
+            /* set type for the address range */
+            DataUtilities.createData(
+                currentProgram,
+                addr,
+                type,
+                type.getLength(),
+                ClearDataMode.CLEAR_ALL_CONFLICT_DATA
+            );
+
+            /* prepend with "type:" to identify that this is a type */
+            if (!name.isEmpty()) {
+                createLabel(addr, "type:" + name, true, SourceType.ANALYSIS);
+            }
+
+            /* add fields for structs */
+            if (ti.kind != Kind.Struct) {
+                return;
+            }
+
+            /* field table address and size */
+            var fieldTy  = new ArrayDataType(Types.structfield, ti.fields.size(), Types.structfield.getLength());
+            var fieldTab = toAddr(getLong(addr.add(Offsets.structtype.fields + Offsets.slice.data)));
+
+            /* set type for the address range */
+            DataUtilities.createData(
+                currentProgram,
+                fieldTab,
+                fieldTy,
+                fieldTy.getLength(),
+                ClearDataMode.CLEAR_ALL_CONFLICT_DATA
+            );
+
+            /* mark the field table location */
+            if (!name.isEmpty()) {
+                createLabel(fieldTab, "fields:" + name, true, SourceType.ANALYSIS);
+            }
+
+            /* mark field names */
+            for (var fv : ti.fields) {
+                createLabel(fv.refs, "name:" + fv.name, true, SourceType.ANALYSIS);
+                setEOLComment(fv.self, fv.name);
+            }
+        }
+
+        private StructureDataType defineStruct(
             DataTypeManager        dtm,
             Map<Address, DataType> cache,
             Address                addr,
+            String                 path,
             String                 name,
             long                   size
-        ) {
-            var path = new CategoryPath("/auto_structs/go");
-            var type = new StructureDataType(path, name, (int)size, dtm);
+        ) throws Exception {
+            var base = name;
+            var lead = new ArrayList<>(Arrays.asList(StringUtils.split(path, '/')));
+
+            // FIXME: this is essentially a hack, find a better way to do this.
+            /* common slice types */
+            if (name.startsWith("slice<")) {
+                if (!path.isEmpty()) {
+                    throw new AnalyzeException("slice types with package path");
+                }
+            }
+
+            /* normal types with package name */
+            else if (StringUtils.contains(name, '.')) {
+                var pos = name.indexOf('.');
+                var str = name.substring(0, pos);
+
+                /* must be a valid name */
+                if (!str.matches("[._\\w\\d]+")) {
+                    throw new AnalyzeException("invalid type name: " + name);
+                }
+
+                /* move the package part into paths */
+                base = name.substring(pos + 1);
+                lead.add(str);
+            }
+
+            /* insert the fixed prefix */
+            lead.add(0, "");
+            lead.add(1, "auto_structs");
+            lead.add(2, "go");
+
+            /* create the type */
+            var dest = new CategoryPath(StringUtils.join(lead, "/"));
+            var type = new StructureDataType(dest, base, (int)size, dtm);
+
+            /* put into cache right away */
             cache.put(addr, type);
             return type;
         }
@@ -674,11 +847,6 @@ public class AnalyzeGoType extends GhidraScript {
             Map<Address, TypeInfo> types,
             Map<Address, DataType> cache
         ) throws Exception {
-            monitor.initialize(types.size());
-            monitor.setMessage("Creating ...");
-            monitor.setShowProgressValue(true);
-
-            /* create every type */
             for (var k : types.keySet()) {
                 autoCreateOneType(dtm, types, cache, k);
             }
@@ -737,7 +905,8 @@ public class AnalyzeGoType extends GhidraScript {
                 /* structs */
                 case Kind.Struct -> {
                     var zero = false;
-                    var type = addStruct(dtm, cache, addr, ti.name, ti.size);
+                    var name = ti.deriveTypeName(addr, false);
+                    var type = defineStruct(dtm, cache, addr, ti.path, name, ti.size);
 
                     /* special case of zero-sized struct with zero-sized fields */
                     if (ti.size == 0 && !ti.fields.isEmpty()) {
@@ -771,8 +940,8 @@ public class AnalyzeGoType extends GhidraScript {
 
                 /* slices */
                 case Kind.Slice -> {
-                    var size = Types.slice.getLength();
-                    var type = addStruct(dtm, cache, addr, ti.name, size);
+                    var name = ti.deriveTypeName(addr, false);
+                    var type = defineStruct(dtm, cache, addr, ti.path, name, Types.slice.getLength());
 
                     /* parse element type */
                     ty = autoCreateOneType(dtm, types, cache, ti.elem);
@@ -818,9 +987,10 @@ public class AnalyzeGoType extends GhidraScript {
                 mod = toAddr(getLong(mod.add(Offsets.moduledata.next)));
             }
 
-            /* set the monitor bar */
+            /* set the monitor */
             monitor.initialize(buf.size());
             monitor.setMessage("Analyzing ...");
+            monitor.setProgress(0);
             monitor.setShowProgressValue(true);
 
             /* bfs queue */
@@ -828,7 +998,7 @@ public class AnalyzeGoType extends GhidraScript {
             var t = new HashMap<Address, TypeInfo>();
             var q = new ArrayDeque<Address>();
 
-            /* process every type */
+            /* scan all the types */
             for (int i = 0; i < buf.size() && !monitor.isCancelled(); i++) {
                 q.add(buf.get(i));
                 monitor.setProgress(i);
@@ -836,8 +1006,40 @@ public class AnalyzeGoType extends GhidraScript {
                 /* bfs the reference tree */
                 while (!q.isEmpty() && !monitor.isCancelled()) {
                     if (!t.containsKey((p = q.removeFirst()))) {
-                        runAtAddress(p, q, t);
+                        scanTypes(p, q, t);
                     }
+                }
+            }
+
+            /* check for cancellation */
+            if (monitor.isCancelled()) {
+                return;
+            }
+
+            /* link all type references */
+            for (var v : t.values()) {
+                if (monitor.isCancelled()) break;
+                if (v.mkey != null)        v.setKeyType(t.get(v.mkey));
+                if (v.elem != null)        v.setElemType(t.get(v.elem));
+            }
+
+            /* check for cancellation */
+            if (monitor.isCancelled()) {
+                return;
+            }
+
+            /* reset monitor */
+            monitor.initialize(t.size());
+            monitor.setMessage("Defining ...");
+            monitor.setProgress(0);
+            monitor.setShowProgressValue(true);
+
+            /* define lables for every type */
+            for (var v : t.entrySet()) {
+                if (!monitor.isCancelled()) {
+                    defineTypeLabel(v.getKey(), v.getValue());
+                } else {
+                    break;
                 }
             }
 
@@ -850,6 +1052,12 @@ public class AnalyzeGoType extends GhidraScript {
             var dtc = new HashMap<Address, DataType>();
             var dtm = currentProgram.getDataTypeManager();
             var dtx = dtm.startTransaction("Auto create types");
+
+            /* reset monitor */
+            monitor.initialize(t.size());
+            monitor.setMessage("Creating ...");
+            monitor.setProgress(0);
+            monitor.setShowProgressValue(true);
 
             /* create all types */
             try {
