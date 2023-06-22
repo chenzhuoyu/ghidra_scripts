@@ -16,10 +16,8 @@ import java.util.Objects;
 import java.util.Queue;
 import java.util.stream.Stream;
 
-import org.apache.commons.io.file.PathUtils;
 import org.apache.commons.lang3.StringUtils;
 import aQute.bnd.unmodifiable.Lists;
-import generic.util.Path;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.ArrayDataType;
