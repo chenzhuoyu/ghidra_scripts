@@ -17,9 +17,11 @@ import java.util.Queue;
 import java.util.stream.Stream;
 
 import org.apache.commons.lang3.StringUtils;
+
 import aQute.bnd.unmodifiable.Lists;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.data.ArrayDataType;
 import ghidra.program.model.data.CategoryPath;
 import ghidra.program.model.data.DataType;
@@ -32,6 +34,7 @@ import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.SymbolType;
 
 final class Kind {
     public static final int Invalid       = 0;
@@ -183,12 +186,14 @@ final class TypeInfo {
 final class StructField {
     public final int     offs;
     public final String  name;
+    public final String  tags;
     public final Address type;
     public final Address self;
     public final Address refs;
 
-    public StructField(String name, Address type, Address self, Address refs, int offs) {
+    public StructField(String name, String tags, Address type, Address self, Address refs, int offs) {
         this.name = name;
+        this.tags = tags;
         this.type = type;
         this.offs = offs;
         this.self = self;
@@ -508,6 +513,21 @@ public class AnalyzeGoType extends GhidraScript {
             Map.entry(Kind.UnsafePointer , Offsets.rtype_uncommon.un)
         );
 
+        private String parseTagAt(Address addr) throws Exception {
+            int len;
+            var flag = getByte(addr);
+
+            /* no tags */
+            if ((flag & (1 << 1)) == 0) {
+                return null;
+            }
+
+            /* skip flags and name */
+            len = Short.reverseBytes(getShort(addr.add(1)));
+            len = Short.reverseBytes(getShort(addr.add(len + 3)));
+            return new String(getBytes(addr.add(len + 5), len));
+        }
+
         private String parseNameAt(Address addr) throws Exception {
             return new String(getBytes(
                 addr.add(3),
@@ -728,16 +748,24 @@ public class AnalyzeGoType extends GhidraScript {
                 var dx = getLong(dp) >>> 1;
                 var ty = toAddr(getLong(tp));
                 var ss = toAddr(getLong(fp));
-                var fn = parseNameAt(ss);
 
                 /* add to registry */
                 queue.add(ty);
-                fieldSeq.add(new StructField(fn, ty, fp, ss, (int)dx));
+                fieldSeq.add(new StructField(parseNameAt(ss), parseTagAt(ss), ty, fp, ss, (int)dx));
             }
 
             /* add the struct */
             types.put(addr, TypeInfo.struct(type, name, path, size, fieldSeq));
             setToolStatusMessage("Found type at %s: %s".formatted(addr, name), false);
+        }
+
+        private void defineLabelAt(Address addr, String name) throws Exception {
+            var as = new AddressSet(addr);
+            var st = currentProgram.getSymbolTable();
+
+            /* remove old lables before creating new one */
+            st.getSymbols(as, SymbolType.LABEL, true).forEach(Symbol::delete);
+            st.createLabel(addr, name, SourceType.ANALYSIS).setPrimary();
         }
 
         private void defineTypeLabel(Address addr, TypeInfo ti) throws Exception {
@@ -759,7 +787,7 @@ public class AnalyzeGoType extends GhidraScript {
 
             /* prepend with "type:" to identify that this is a type */
             if (!name.isEmpty()) {
-                createLabel(addr, "type:" + name, true, SourceType.ANALYSIS);
+                defineLabelAt(addr, "type:" + name);
             }
 
             /* add fields for structs */
@@ -782,13 +810,13 @@ public class AnalyzeGoType extends GhidraScript {
 
             /* mark the field table location */
             if (!name.isEmpty()) {
-                createLabel(fieldTab, "fields:" + name, true, SourceType.ANALYSIS);
+                defineLabelAt(fieldTab, "fields:" + name);
             }
 
             /* mark field names */
             for (var fv : ti.fields) {
-                createLabel(fv.refs, "name:" + fv.name, true, SourceType.ANALYSIS);
                 setEOLComment(fv.self, fv.name);
+                defineLabelAt(fv.refs, "name:" + fv.name);
             }
         }
 
@@ -919,7 +947,7 @@ public class AnalyzeGoType extends GhidraScript {
 
                         /* don't set fields for zero-sized structs */
                         if (!zero) {
-                            type.replaceAtOffset(fv.offs, ret, ret.getLength(), fv.name, null);
+                            type.replaceAtOffset(fv.offs, ret, ret.getLength(), fv.name, fv.tags);
                         }
                     }
 
