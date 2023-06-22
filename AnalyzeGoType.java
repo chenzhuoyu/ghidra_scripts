@@ -148,7 +148,7 @@ final class TypeInfo {
         return name.matches("[._\\w\\d]+") ? prefix(name, withPath) : switch (kind) {
             case Kind.Array     -> "array<%d,%s>".formatted(size, elemString(withPath));
             case Kind.Chan      -> "chan<%s,%s>".formatted(chandir(), elemString(withPath));
-            case Kind.Func      -> addr.toString("anonfunc_");
+            case Kind.Func      -> name.equals("func()") ? "efunc" : addr.toString("anonfunc_");
             case Kind.Interface -> name.equals("interface {}") ? "eface" : addr.toString("anoniface_");
             case Kind.Map       -> "map<%s,%s>".formatted(keyString(withPath), elemString(withPath));
             case Kind.Ptr       -> "*" + elemString(withPath);
@@ -514,18 +514,18 @@ public class AnalyzeGoType extends GhidraScript {
         );
 
         private String parseTagAt(Address addr) throws Exception {
-            int len;
-            var flag = getByte(addr);
+            int val = getByte(addr);
+            int bit = val & (1 << 1);
 
             /* no tags */
-            if ((flag & (1 << 1)) == 0) {
+            if (bit == 0) {
                 return null;
             }
 
             /* skip flags and name */
-            len = Short.reverseBytes(getShort(addr.add(1)));
-            len = Short.reverseBytes(getShort(addr.add(len + 3)));
-            return new String(getBytes(addr.add(len + 5), len));
+            int ptr = Short.reverseBytes(getShort(addr.add(1)));
+            int len = Short.reverseBytes(getShort(addr.add(ptr + 3)));
+            return new String(getBytes(addr.add(ptr + 5), len));
         }
 
         private String parseNameAt(Address addr) throws Exception {
