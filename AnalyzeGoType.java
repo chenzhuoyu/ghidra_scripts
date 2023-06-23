@@ -201,7 +201,6 @@ final class StructField {
     }
 }
 
-
 public class AnalyzeGoType extends GhidraScript {
     private final class Analyzer {
         private final class Types {
@@ -220,36 +219,36 @@ public class AnalyzeGoType extends GhidraScript {
 
             public final DataType bool    = sized("/bool", 1);
             public final DataType void_p  = sized("/void *", 8);
-            public final DataType uintptr = sized("/_uintptr_t.h/uintptr_t", 8);
+            public final DataType uintptr = sized("/gotypes.h/uintptr", 8);
 
-            public final Structure rtype         = struct("/go/rtype");
-            public final Structure maptype       = struct("/go/maptype");
-            public final Structure ptrtype       = struct("/go/ptrtype");
-            public final Structure chantype      = struct("/go/chantype");
-            public final Structure functype      = struct("/go/functype");
-            public final Structure arraytype     = struct("/go/arraytype");
-            public final Structure slicetype     = struct("/go/slicetype");
-            public final Structure structtype    = struct("/go/structtype");
-            public final Structure uncommontype  = struct("/go/uncommontype");
-            public final Structure interfacetype = struct("/go/interfacetype");
+            public final Structure rtype         = struct("/gotypes.h/rtype");
+            public final Structure maptype       = struct("/gotypes.h/maptype");
+            public final Structure ptrtype       = struct("/gotypes.h/ptrtype");
+            public final Structure chantype      = struct("/gotypes.h/chantype");
+            public final Structure functype      = struct("/gotypes.h/functype");
+            public final Structure arraytype     = struct("/gotypes.h/arraytype");
+            public final Structure slicetype     = struct("/gotypes.h/slicetype");
+            public final Structure structtype    = struct("/gotypes.h/structtype");
+            public final Structure uncommontype  = struct("/gotypes.h/uncommontype");
+            public final Structure interfacetype = struct("/gotypes.h/interfacetype");
 
-            public final Structure rtype_uncommon         = struct("/go/rtype_uncommon");
-            public final Structure maptype_uncommon       = struct("/go/maptype_uncommon");
-            public final Structure ptrtype_uncommon       = struct("/go/ptrtype_uncommon");
-            public final Structure chantype_uncommon      = struct("/go/chantype_uncommon");
-            public final Structure functype_uncommon      = struct("/go/functype_uncommon");
-            public final Structure arraytype_uncommon     = struct("/go/arraytype_uncommon");
-            public final Structure slicetype_uncommon     = struct("/go/slicetype_uncommon");
-            public final Structure structtype_uncommon    = struct("/go/structtype_uncommon");
-            public final Structure interfacetype_uncommon = struct("/go/interfacetype_uncommon");
+            public final Structure rtype_uncommon         = struct("/gotypes.h/rtype_uncommon");
+            public final Structure maptype_uncommon       = struct("/gotypes.h/maptype_uncommon");
+            public final Structure ptrtype_uncommon       = struct("/gotypes.h/ptrtype_uncommon");
+            public final Structure chantype_uncommon      = struct("/gotypes.h/chantype_uncommon");
+            public final Structure functype_uncommon      = struct("/gotypes.h/functype_uncommon");
+            public final Structure arraytype_uncommon     = struct("/gotypes.h/arraytype_uncommon");
+            public final Structure slicetype_uncommon     = struct("/gotypes.h/slicetype_uncommon");
+            public final Structure structtype_uncommon    = struct("/gotypes.h/structtype_uncommon");
+            public final Structure interfacetype_uncommon = struct("/gotypes.h/interfacetype_uncommon");
 
-            public final Structure iface       = struct("/go/iface");
-            public final Structure slice       = struct("/go/slice");
-            public final Structure string      = struct("/go/string");
-            public final Structure complex64   = struct("/go/complex64");
-            public final Structure complex128  = struct("/go/complex128");
-            public final Structure moduledata  = struct("/go/moduledata");
-            public final Structure structfield = struct("/go/structfield");
+            public final Structure iface       = struct("/gotypes.h/iface");
+            public final Structure slice       = struct("/gotypes.h/slice");
+            public final Structure string      = struct("/gotypes.h/string");
+            public final Structure complex64   = struct("/gotypes.h/complex64");
+            public final Structure complex128  = struct("/gotypes.h/complex128");
+            public final Structure moduledata  = struct("/gotypes.h/moduledata");
+            public final Structure structfield = struct("/gotypes.h/structfield");
 
             public DataType of(String path) {
                 var dtm = currentProgram.getDataTypeManager();
