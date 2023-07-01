@@ -996,20 +996,35 @@ public class AnalyzeGoType extends GhidraScript {
             var buf = new ArrayList<Address>();
             var mod = Symbols.runtime.firstmoduledata.getAddress();
 
-            /* iterate over all modules */
-            while (mod.getOffset() != 0) {
-                var ptr = toAddr(getLong(mod.add(Offsets.moduledata.types)));
-                var tlp = toAddr(getLong(mod.add(Offsets.moduledata.typelinks + Offsets.slice.data)));
-                var len = getInt(mod.add(Offsets.moduledata.typelinks + Offsets.slice.len));
+            /* choose scan mode */
+            var choice = askChoice(
+                "Scan Types",
+                "Scan the entire program or just the current address?",
+                Lists.of("Current Address", "Entire Program"),
+                "Current Address"
+            );
 
-                /* iterate over every type */
-                for (int i = 0; i < len; i++) {
-                    buf.add(ptr.add(getInt(tlp.add(i * 4))));
+            /* add current address if needed */
+            if (choice.equals("Current Address")) {
+                buf.add(currentAddress);
+            }
+
+            /* iterate over all modules if needed */
+            if (choice.equals("Entire Program")) {
+                while (mod.getOffset() != 0) {
+                    var ptr = toAddr(getLong(mod.add(Offsets.moduledata.types)));
+                    var tlp = toAddr(getLong(mod.add(Offsets.moduledata.typelinks + Offsets.slice.data)));
+                    var len = getInt(mod.add(Offsets.moduledata.typelinks + Offsets.slice.len));
+
+                    /* iterate over every type */
+                    for (int i = 0; i < len; i++) {
+                        buf.add(ptr.add(getInt(tlp.add(i * 4))));
+                    }
+
+                    /* move to next module */
+                    setToolStatusMessage("Found %d types in module %s".formatted(len, mod), false);
+                    mod = toAddr(getLong(mod.add(Offsets.moduledata.next)));
                 }
-
-                /* move to next module */
-                setToolStatusMessage("Found %d types in module %s".formatted(len, mod), false);
-                mod = toAddr(getLong(mod.add(Offsets.moduledata.next)));
             }
 
             /* set the monitor */
